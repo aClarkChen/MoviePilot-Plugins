@@ -12,6 +12,16 @@ from app.plugins import _PluginBase
 from app.schemas import ServiceInfo
 
 
+def _parse_tag_map(tag_map: str) -> Dict[str, int]:
+    """解析标签限速配置"""
+    parsed_map = {}
+    for item in tag_map.split("\n"):
+        parts = item.split(":")
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            parsed_map[parts[0].strip()] = int(parts[1].strip())
+    return parsed_map
+
+
 class Limit(_PluginBase):
     # 插件名称
     plugin_name = "自动限速"
@@ -20,7 +30,7 @@ class Limit(_PluginBase):
     # 插件图标
     plugin_icon = "Youtube-dl_A.png"
     # 插件版本
-    plugin_version = "1.1.4"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "ClarkChen"
     # 作者主页
@@ -51,6 +61,7 @@ class Limit(_PluginBase):
     _downloaders = None
     _global_speed = 0
     _tag_map = "标签:限速(KB)"
+    _parsed_tag_map = {}
 
     def init_plugin(self, config: dict = None):
         self.downloader_helper = DownloaderHelper()
@@ -67,6 +78,7 @@ class Limit(_PluginBase):
             self._downloaders = config.get("downloaders")
             self._global_speed = self.str_to_number(config.get("global_speed"), 0)
             self._tag_map = config.get("tag_map") or "标签:限速(KB)"
+            self._parsed_tag_map = _parse_tag_map(self._tag_map)
 
         # 停止现有任务
         self.stop_service()
@@ -191,25 +203,17 @@ class Limit(_PluginBase):
             if self._global:
                 downloader_obj.set_speed_limit(download_limit=0, upload_limit=self._global_speed)
             # 按标签限速
-            if not self._tag_map:
+            if not self._parsed_tag_map:
                 continue
-            tag_maps = self._tag_map.split("\n")
-            tag_map = {}
-            for item in tag_maps:
-                i = item.split(":")
-                _tag = i[0]
-                if not i[1]:
-                    continue
-                _speed = int(i[1])
-                tag_map[_tag] = _speed
             # 获取下载器中的种子
             torrents, error = downloader_obj.get_torrents()
             # 如果下载器获取种子发生错误 或 没有种子 则跳过
-            if error or not torrents:
+            if error or not isinstance(torrents, list):
+                logger.error(f"{self.LOG_TAG} 下载器 {downloader} 获取种子失败: {error}")
                 continue
             logger.info(f"{self.LOG_TAG}下载器 {downloader} 分析种子信息中 ...")
             for torrent in torrents:
-                if torrent.up_limit > 0 and not self._cover:
+                if self._get_limited(self, torrent=torrent, dl_type=service.type):
                     continue
                 try:
                     if self._event.is_set():
@@ -220,13 +224,13 @@ class Limit(_PluginBase):
                     # 获取种子当前标签
                     torrent_tags = self._get_tags(torrent=torrent, dl_type=service.type)
                     for tag in torrent_tags:
-                        if tag in tag_map:
-                            speed = tag_map[tag]
-                            self._set_torrent_speed(service=service, _hash= _hash, _speed= speed)
+                        if tag in self._parsed_tag_map:
+                            speed = self._parsed_tag_map[tag]
+                            self._set_torrent_speed(service=service, _hash=_hash, _speed=speed)
                             break
                 except Exception as e:
                     logger.error(
-                        f"{self.LOG_TAG}分析种子信息时发生了错误: {str(e)}")
+                        f"{self.LOG_TAG}分析种子信息时发生了错误: 下载器={downloader}, 错误={str(e)}")
         logger.info(f"{self.LOG_TAG}执行完成")
 
     @staticmethod
@@ -234,7 +238,7 @@ class Limit(_PluginBase):
         try:
             return torrent.get("hash") if dl_type == "qbittorrent" else torrent.hashString
         except Exception as e:
-            print(str(e))
+            logger.error(f"获取种子哈希值失败: {str(e)}")
             return ""
 
     @staticmethod
@@ -243,8 +247,18 @@ class Limit(_PluginBase):
             return [str(tag).strip() for tag in torrent.get("tags", "").split(',')] \
                 if dl_type == "qbittorrent" else torrent.labels or []
         except Exception as e:
-            print(str(e))
+            logger.error(f"获取种子标签失败: {str(e)}")
             return []
+
+    @staticmethod
+    def _get_limited(self, torrent: Any, dl_type: str):
+        if self._cover or dl_type != "qbittorrent":
+            return False
+        try:
+            return torrent.up_limit > 0
+        except Exception as e:
+            logger.error(f"判断种子是否已限速失败: {str(e)}")
+            return False
 
     def _set_torrent_speed(self, service: ServiceInfo, _hash: str, _speed: int = None):
         if not service or not service.instance:
@@ -252,10 +266,10 @@ class Limit(_PluginBase):
         downloader_obj = service.instance
         # 下载器api不通用, 因此需分开处理
         if service.type == "qbittorrent":
-            downloader_obj.qbc.torrents_set_upload_limit(torrent_hashes= _hash,limit= _speed)
+            downloader_obj.qbc.torrents_set_upload_limit(torrent_hashes=_hash, limit=_speed)
         else:
-            downloader_obj.change_torrent(hash_string= _hash,upload_limit= _speed)
-        logger.warn(f"{self.LOG_TAG}下载器: {service.name} 种子id: {_hash}  上传限速为 {_speed}KB/S")
+            downloader_obj.change_torrent(hash_string=_hash, upload_limit=_speed)
+        logger.info(f"{self.LOG_TAG}下载器: {service.name} 种子id: {_hash} 上传限速为 {_speed}KB/S")
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -525,4 +539,4 @@ class Limit(_PluginBase):
                     self._event.clear()
                 self._scheduler = None
         except Exception as e:
-            print(str(e))
+            logger.error(f"停止服务时发生错误: {str(e)}")
