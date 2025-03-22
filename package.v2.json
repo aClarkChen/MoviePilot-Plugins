@@ -25,7 +25,7 @@
     "name": "自动限速",
     "description": "给qb、tr的下载任务限速",
     "labels": "下载管理",
-    "version": "1.1.4",
+    "version": "1.2.0",
     "icon": "Youtube-dl_A.png",
     "author": "ClarkChen",
     "level": 2
